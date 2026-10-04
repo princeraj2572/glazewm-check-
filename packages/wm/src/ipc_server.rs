@@ -92,7 +92,7 @@ impl IpcServer {
   ) -> anyhow::Result<()> {
     info!("Incoming IPC connection from: {}.", addr);
 
-    let ws_stream = accept_hdr_async(stream, reject_browser_origin)
+    let ws_stream = accept_hdr_async(stream, Self::reject_browser_origin)
       .await
       .context("Error during websocket handshake.")?;
 
