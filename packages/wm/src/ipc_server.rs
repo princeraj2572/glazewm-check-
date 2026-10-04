@@ -8,7 +8,14 @@ use tokio::{
   sync::{broadcast, mpsc},
   task,
 };
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_tungstenite::{
+  accept_hdr_async,
+  tungstenite::{
+    handshake::server::{ErrorResponse, Request, Response},
+    http::StatusCode,
+    Message,
+  },
+};
 use tracing::{info, warn};
 use uuid::Uuid;
 use wm_common::{
@@ -85,7 +92,7 @@ impl IpcServer {
   ) -> anyhow::Result<()> {
     info!("Incoming IPC connection from: {}.", addr);
 
-    let ws_stream = accept_async(stream)
+    let ws_stream = accept_hdr_async(stream, reject_browser_origin)
       .await
       .context("Error during websocket handshake.")?;
 
@@ -129,6 +136,29 @@ impl IpcServer {
     }
 
     res
+  }
+
+  /// Rejects the websocket handshake when the request has an `Origin`
+  /// header.
+  ///
+  /// Browsers always attach `Origin` to websocket handshakes and are not
+  /// bound by the same-origin policy for them. Without this check, any
+  /// website could connect to the local IPC server and run commands (e.g.
+  /// `shell-exec`). Non-browser clients (e.g. the CLI) don't send it.
+  #[allow(clippy::result_large_err)]
+  fn reject_browser_origin(
+    request: &Request,
+    response: Response,
+  ) -> Result<Response, ErrorResponse> {
+    if request.headers().contains_key("origin") {
+      warn!("Rejected IPC connection with an `Origin` header.");
+
+      let mut error = ErrorResponse::new(None);
+      *error.status_mut() = StatusCode::FORBIDDEN;
+      return Err(error);
+    }
+
+    Ok(response)
   }
 
   pub fn process_message(
@@ -406,5 +436,35 @@ impl IpcServer {
 impl Drop for IpcServer {
   fn drop(&mut self) {
     self.stop();
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use tokio_tungstenite::tungstenite::handshake::server::{
+    Request, Response,
+  };
+
+  use super::IpcServer;
+
+  #[test]
+  fn rejects_requests_with_origin() {
+    let request = Request::builder()
+      .uri("ws://127.0.0.1:6123")
+      .header("Origin", "https://evil.example")
+      .body(())
+      .unwrap();
+
+    assert!(IpcServer::reject_browser_origin(&request, Response::new(()))
+      .is_err());
+  }
+
+  #[test]
+  fn allows_requests_without_origin() {
+    let request =
+      Request::builder().uri("ws://127.0.0.1:6123").body(()).unwrap();
+
+    assert!(IpcServer::reject_browser_origin(&request, Response::new(()))
+      .is_ok());
   }
 }
